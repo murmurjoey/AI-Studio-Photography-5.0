@@ -6,6 +6,7 @@ export interface UploadedImage {
 }
 
 export interface GeneratedResult {
+  id: string;
   image: string | null;
   text: string | null;
 }
@@ -19,4 +20,17 @@ export interface GenerationOptions {
   lens: string;
   expression: string;
   pose: string;
+  numberOfVariations: number;
+  aspectRatio: string;
+}
+
+export interface HistoryEntry {
+  id: string;
+  timestamp: number;
+  sourceImage: UploadedImage;
+  clothingImage: UploadedImage | null;
+  clothingPrompt: string;
+  additionalPrompt: string;
+  options: GenerationOptions;
+  results: GeneratedResult[];
 }

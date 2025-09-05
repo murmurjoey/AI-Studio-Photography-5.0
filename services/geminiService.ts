@@ -66,7 +66,8 @@ export const generateStudioPortrait = async (
       }
     }
     
-    return { image: generatedImageBase64, text: generatedText };
+    // FIX: Added missing 'id' property to the return object to match the 'GeneratedResult' type.
+    return { id: crypto.randomUUID(), image: generatedImageBase64, text: generatedText };
 
   } catch (error) {
     console.error("Error calling Gemini API:", error);

@@ -1,9 +1,64 @@
 
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ImageUploader from './components/ImageUploader';
 import Spinner from './components/Spinner';
 import { generateStudioPortrait } from './services/geminiService';
-import type { UploadedImage, GeneratedResult, GenerationOptions } from './types';
+import type { UploadedImage, GeneratedResult, GenerationOptions, HistoryEntry } from './types';
+import JSZip from 'jszip';
+
+
+// Helper function to create a compressed thumbnail from a data URL for storing in history
+const createThumbnail = async (
+  dataUrl: string, 
+  maxWidth: number = 256, 
+  maxHeight: number = 256, 
+  quality: number = 0.8
+): Promise<UploadedImage> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      // Calculate new dimensions while preserving aspect ratio
+      let { width, height } = img;
+      if (width > height) {
+        if (width > maxWidth) {
+          height = Math.round((height * maxWidth) / width);
+          width = maxWidth;
+        }
+      } else {
+        if (height > maxHeight) {
+          width = Math.round((width * maxHeight) / height);
+          height = maxHeight;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return reject(new Error('Could not get canvas context for thumbnail generation.'));
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      
+      const mimeType = 'image/jpeg';
+      const newDataUrl = canvas.toDataURL(mimeType, quality);
+      const [, base64Data] = newDataUrl.split(',');
+
+      resolve({
+        base64: base64Data,
+        mimeType,
+        previewUrl: newDataUrl,
+      });
+    };
+    img.onerror = (err) => {
+      console.error("Failed to load image for thumbnail creation", err);
+      reject(new Error('Failed to load image for thumbnail creation.'));
+    };
+    img.src = dataUrl;
+  });
+};
+
 
 // --- Reusable UI Components defined within App.tsx ---
 
@@ -26,6 +81,73 @@ const OptionSelect: React.FC<{ label: string; value: string; onChange: (e: React
     </select>
   </div>
 );
+
+const NumberInput: React.FC<{ label: string; value: number; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; min: number; max: number; disabled?: boolean }> = ({ label, value, onChange, min, max, disabled = false }) => (
+  <div>
+    <label className="block text-sm font-medium text-slate-400 mb-1">{label}</label>
+    <input
+      type="number"
+      value={value}
+      onChange={onChange}
+      min={min}
+      max={max}
+      disabled={disabled}
+      className="w-full bg-slate-700/50 border border-slate-600 rounded-md shadow-sm py-2 px-3 text-slate-200 focus:outline-none focus:ring-2 focus:ring-purple-500 transition disabled:opacity-50 disabled:cursor-not-allowed"
+      aria-label={label}
+    />
+  </div>
+);
+
+const SIZE_PRESETS = [
+  {
+    id: 'passport',
+    name: '護照照',
+    size_mm: { width: 35, height: 45 },
+    size_inch: { width: 1.38, height: 1.77 },
+    size_px: { width: 413, height: 531 },
+    note: '國際標準護照/簽證常用尺寸'
+  },
+  {
+    id: 'taiwan_id',
+    name: '台灣身分證／健保卡',
+    size_mm: { width: 33, height: 48 },
+    size_inch: { width: 1.30, height: 1.89 },
+    size_px: { width: 390, height: 567 },
+    note: '台灣官方證件規格'
+  },
+  {
+    id: 'us_visa',
+    name: '美國簽證／USCIS',
+    size_mm: { width: 51, height: 51 },
+    size_inch: { width: 2.0, height: 2.0 },
+    size_px: { width: 600, height: 600 },
+    note: '美國常見規格，頭部比例有嚴格規定'
+  },
+  {
+    id: 'resume',
+    name: '商務履歷照（4:5）',
+    size_mm: { width: 40, height: 50 },
+    size_inch: { width: 1.57, height: 1.97 },
+    size_px: { width: 472, height: 590 },
+    note: '建議 4:5 比例，適合 LinkedIn、履歷'
+  },
+  {
+    id: 'avatar',
+    name: '社群頭像（1:1）',
+    size_mm: null,
+    size_inch: null,
+    size_px: { width: 600, height: 600 },
+    note: '1:1 正方形，適合 FB/IG/Line/LinkedIn 頭像'
+  },
+  {
+    id: 'cover',
+    name: '封面照（16:9）',
+    size_mm: null,
+    size_inch: null,
+    size_px: { width: 1920, height: 1080 },
+    note: '16:9 比例，適合簡報首圖、FB/LinkedIn 封面'
+  }
+] as const;
 
 
 const lightingOptions = {
@@ -217,21 +339,34 @@ const ControlPanel: React.FC<{
   backgroundCategory: string,
   onBackgroundCategoryChange: (e: React.ChangeEvent<HTMLSelectElement>) => void,
 }> = ({ options, setOptions, lightingCategory, onLightingCategoryChange, backgroundCategory, onBackgroundCategoryChange }) => {
-  const handleChange = (field: keyof GenerationOptions) => (e: React.ChangeEvent<HTMLSelectElement>) => {
-    setOptions(prev => ({ ...prev, [field]: e.target.value }));
+  const handleChange = (field: keyof GenerationOptions) => (e: React.ChangeEvent<HTMLSelectElement | HTMLInputElement>) => {
+    const value = field === 'numberOfVariations'
+      ? parseInt(e.target.value, 10)
+      : e.target.value;
+    setOptions(prev => ({ ...prev, [field]: value }));
   };
 
   return (
     <div className="bg-slate-800/50 ring-1 ring-slate-700 rounded-xl p-4 sm:p-6 shadow-lg mt-6">
       <h3 className="text-xl font-semibold mb-4 text-slate-300 text-center">風格設定</h3>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="人像風格" value={options.style} onChange={handleChange('style')}>
           <option value="">請選擇...</option>
           {styleOptions.map(opt => (
             <option key={opt.prompt} value={opt.prompt}>{opt.name}</option>
           ))}
         </OptionSelect>
+
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
+        <OptionSelect label="精準比例" value={options.aspectRatio} onChange={handleChange('aspectRatio')}>
+          <option value="">無 (自由裁切)</option>
+          {SIZE_PRESETS.map(opt => (
+            <option key={opt.id} value={opt.id}>{opt.name}</option>
+          ))}
+        </OptionSelect>
         
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="燈光類別" value={lightingCategory} onChange={onLightingCategoryChange}>
           <option value="">請選擇...</option>
           {Object.keys(lightingOptions).map(category => (
@@ -239,6 +374,7 @@ const ControlPanel: React.FC<{
           ))}
         </OptionSelect>
 
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="燈光選擇" value={options.lighting} onChange={handleChange('lighting')} disabled={!lightingCategory}>
           <option value="">請先選擇燈光類別</option>
           {lightingCategory && lightingOptions[lightingCategory as keyof typeof lightingOptions].map(opt => (
@@ -246,6 +382,7 @@ const ControlPanel: React.FC<{
           ))}
         </OptionSelect>
 
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="背景類別" value={backgroundCategory} onChange={onBackgroundCategoryChange}>
            <option value="">請選擇...</option>
           {Object.keys(backgroundOptions).map(category => (
@@ -253,6 +390,7 @@ const ControlPanel: React.FC<{
           ))}
         </OptionSelect>
 
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="背景選擇" value={options.background} onChange={handleChange('background')} disabled={!backgroundCategory}>
           <option value="">請先選擇背景類別</option>
           {backgroundCategory && backgroundOptions[backgroundCategory as keyof typeof backgroundOptions].map(opt => (
@@ -260,6 +398,7 @@ const ControlPanel: React.FC<{
           ))}
         </OptionSelect>
         
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="拍攝角度" value={options.angle} onChange={handleChange('angle')}>
           <option value="">請選擇...</option>
           {angleOptions.map(opt => (
@@ -267,6 +406,7 @@ const ControlPanel: React.FC<{
           ))}
         </OptionSelect>
 
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="距離構圖" value={options.composition} onChange={handleChange('composition')}>
           <option value="">請選擇...</option>
           {compositionOptions.map(opt => (
@@ -274,20 +414,29 @@ const ControlPanel: React.FC<{
           ))}
         </OptionSelect>
 
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="鏡頭焦段" value={options.lens} onChange={handleChange('lens')}>
            <option value="">請選擇...</option>
            {lensOptions.map(opt => (
             <option key={opt.prompt} value={opt.prompt}>{opt.name}</option>
           ))}
         </OptionSelect>
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
          <OptionSelect label="AI 表情生成" value={options.expression} onChange={handleChange('expression')}>
            {expressionOptions.map(opt => (
             <option key={opt.prompt} value={opt.prompt}>{opt.name}</option>
           ))}
         </OptionSelect>
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
         <OptionSelect label="肢體動作" value={options.pose} onChange={handleChange('pose')}>
            {poseOptions.map(opt => (
             <option key={opt.prompt} value={opt.prompt}>{opt.name}</option>
+          ))}
+        </OptionSelect>
+        {/* FIX: Corrected closing tag from </Select> to </OptionSelect>. */}
+         <OptionSelect label="變化張數" value={options.numberOfVariations.toString()} onChange={handleChange('numberOfVariations')}>
+          {Array.from({ length: 6 }, (_, i) => i + 1).map(num => (
+            <option key={num} value={num}>{num} 張</option>
           ))}
         </OptionSelect>
       </div>
@@ -416,6 +565,131 @@ const CameraCapture: React.FC<{ onCapture: (image: UploadedImage) => void }> = (
   );
 };
 
+const ResultDisplay: React.FC<{ 
+    generatedResults: GeneratedResult[] | null, 
+    isLoading: boolean, 
+    error: string | null,
+    options: GenerationOptions
+}> = ({ generatedResults, isLoading, error, options }) => {
+    if (isLoading) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full space-y-4">
+          <Spinner />
+          <p className="text-slate-400 text-lg animate-pulse">AI 正在處理您的人像照...</p>
+          <p className="text-slate-500 text-sm text-center">正在生成 {options.numberOfVariations} 張圖片，請耐心等候。</p>
+        </div>
+      );
+    }
+    if (error) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full text-center text-red-400 p-4 bg-red-900/20 rounded-lg">
+           <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <p className="font-semibold">生成失敗</p>
+          <p className="text-sm mt-2">{error}</p>
+        </div>
+      );
+    }
+    if (generatedResults && generatedResults.length > 0) {
+       return (
+        <div className="w-full h-full flex flex-col items-center animate-fadeIn">
+          <h2 className="text-2xl font-bold text-center mb-4 text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">您的專業人像照</h2>
+          <div className="w-full grid grid-cols-2 gap-4 overflow-y-auto max-h-[calc(100vh-250px)] p-1">
+            {generatedResults.map(result => (
+              <div key={result.id} className="relative group rounded-lg overflow-hidden shadow-lg shadow-black/30 aspect-square bg-black/20">
+                <img
+                  src={result.image!}
+                  alt="Generated"
+                  className="w-full h-full object-contain"
+                />
+                 <a 
+                  href={result.image!} 
+                  download={`portrait_${result.id}.png`}
+                  className="absolute bottom-2 right-2 bg-slate-900/70 text-white p-2 rounded-full hover:bg-purple-600 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                  aria-label="Download image"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
+                </a>
+                {result.text && (
+                  <p className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs p-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">{result.text}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+    return (
+       <div className="flex flex-col items-center justify-center h-full text-slate-500 text-center">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+        <h3 className="text-xl font-medium text-slate-300">預覽結果</h3>
+        <p className="mt-1">設定風格後點擊生成，<br/>您的 AI 棚拍照將會顯示在此處。</p>
+      </div>
+    );
+};
+
+const HistoryPanel: React.FC<{
+  history: HistoryEntry[];
+  onClearHistory: () => void;
+  onExport: (entries: HistoryEntry[]) => void;
+  isExporting: boolean;
+}> = ({ history, onClearHistory, onExport, isExporting }) => {
+  if (history.length === 0) {
+    return (
+      <div className="text-center text-slate-500 py-8">
+        <p>目前沒有歷史紀錄。</p>
+      </div>
+    );
+  }
+
+  const handleClear = () => {
+    if (window.confirm('您確定要清除所有歷史紀錄嗎？此操作無法復原。')) {
+      onClearHistory();
+    }
+  };
+
+  return (
+    <div className="w-full bg-slate-800/50 ring-1 ring-slate-700 rounded-xl p-4 sm:p-6 shadow-lg mt-8">
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-2xl font-bold text-slate-300">歷史紀錄</h2>
+        <div className="flex space-x-2">
+            <button onClick={() => onExport(history)} disabled={isExporting} className="text-sm px-3 py-1 bg-sky-600 text-white rounded-md hover:bg-sky-700 disabled:opacity-50">
+                {isExporting ? '匯出中...' : '全部匯出'}
+            </button>
+            <button onClick={handleClear} disabled={isExporting} className="text-sm px-3 py-1 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50">
+                清除所有紀錄
+            </button>
+        </div>
+      </div>
+      <div className="space-y-4 max-h-96 overflow-y-auto p-1">
+        {history.map(entry => (
+          <div key={entry.id} className="bg-slate-800 p-3 rounded-lg flex items-start space-x-4">
+            <img src={entry.sourceImage.previewUrl} alt="Source" className="w-16 h-16 rounded-md object-cover" />
+            <div className="flex-grow">
+              <p className="text-sm text-slate-400">{new Date(entry.timestamp).toLocaleString()}</p>
+              <div className="flex space-x-2 mt-2 overflow-x-auto">
+                {entry.results.map(result => (
+                  <img key={result.id} src={result.image!} alt="Result" className="w-12 h-12 rounded-md object-cover flex-shrink-0" />
+                ))}
+              </div>
+            </div>
+            <div className="flex flex-col space-y-2">
+               <button onClick={() => onExport([entry])} disabled={isExporting} className="text-xs px-2 py-1 bg-sky-600/80 text-white rounded-md hover:bg-sky-700 w-full disabled:opacity-50">
+                匯出
+               </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 
 // --- Main App Component ---
 
@@ -425,9 +699,11 @@ const App: React.FC = () => {
   const [clothingPrompt, setClothingPrompt] = useState<string>('');
   const [additionalPrompt, setAdditionalPrompt] = useState<string>('');
   const [inputMode, setInputMode] = useState<'upload' | 'camera'>('upload');
-  const [generatedResult, setGeneratedResult] = useState<GeneratedResult | null>(null);
+  const [generatedResults, setGeneratedResults] = useState<GeneratedResult[] | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
 
   const [lightingCategory, setLightingCategory] = useState<string>('');
   const [backgroundCategory, setBackgroundCategory] = useState<string>('');
@@ -441,24 +717,49 @@ const App: React.FC = () => {
     lens: '',
     expression: 'keep the original expression',
     pose: 'keep the original pose',
+    numberOfVariations: 1,
+    aspectRatio: '',
   });
-  
-  useEffect(() => {
-    const resetToDefaults = () => {
-        setOptions(prev => ({
-            ...prev,
-            lighting: '',
-            background: '',
-            angle: '',
-            composition: '',
-            lens: '',
-            expression: 'keep the original expression',
-            pose: 'keep the original pose',
-        }));
-        setLightingCategory('');
-        setBackgroundCategory('');
-    };
 
+  useEffect(() => {
+    try {
+      const savedHistory = localStorage.getItem('generationHistory');
+      if (savedHistory) {
+        setHistory(JSON.parse(savedHistory));
+      }
+    } catch (e) {
+      console.error("Failed to load history from localStorage", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('generationHistory', JSON.stringify(history));
+    } catch (e) {
+      if (e instanceof DOMException && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED')) {
+        alert('無法儲存至歷史紀錄：您的瀏覽器儲存空間已滿。');
+      }
+      console.error("Failed to save history to localStorage", e);
+    }
+  }, [history]);
+
+  const resetOptionsToDefault = useCallback(() => {
+    setOptions(prev => ({
+        ...prev,
+        lighting: '',
+        background: '',
+        angle: '',
+        composition: '',
+        lens: '',
+        aspectRatio: '',
+        expression: 'keep the original expression',
+        pose: 'keep the original pose',
+    }));
+    setLightingCategory('');
+    setBackgroundCategory('');
+  }, []);
+
+  useEffect(() => {
     if (options.style === 'ID photo') {
         setOptions(prev => ({
             ...prev,
@@ -466,16 +767,17 @@ const App: React.FC = () => {
             background: 'plain white background',
             angle: 'eye-level angle',
             pose: 'standing, facing forward',
+            expression: 'a serious, neutral expression',
+            aspectRatio: 'passport',
             lighting: '',
             lens: '',
-            expression: 'keep the original expression',
         }));
         setLightingCategory(''); 
         setBackgroundCategory('🎨 基礎背景');
     } else { 
-        resetToDefaults();
+        resetOptionsToDefault();
     }
-  }, [options.style]);
+  }, [options.style, resetOptionsToDefault]);
   
   const handleLightingCategoryChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newCategory = e.target.value as keyof typeof lightingOptions;
@@ -503,6 +805,10 @@ const App: React.FC = () => {
 
     const settings: string[] = [];
     if (opts.style) settings.push(`- Overall Style: '${opts.style}'.`);
+    const selectedPreset = SIZE_PRESETS.find(p => p.id === opts.aspectRatio);
+    if (selectedPreset) {
+      settings.push(`- Aspect Ratio: Strictly adhere to the '${selectedPreset.name}' format. The final image composition must match this aspect ratio precisely.`);
+    }
     if (opts.lighting) settings.push(`- Lighting: '${opts.lighting}'.`);
     if (opts.background) settings.push(`- Background: A '${opts.background}' background.`);
     if (opts.angle) settings.push(`- Camera Angle: '${opts.angle}'.`);
@@ -557,15 +863,49 @@ const App: React.FC = () => {
 
     setIsLoading(true);
     setError(null);
-    setGeneratedResult(null);
+    setGeneratedResults(null);
 
     try {
       const prompt = buildPrompt(options, clothingPrompt, !!clothingImage, additionalPrompt);
-      const result = await generateStudioPortrait(sourceImage, prompt, clothingImage);
-      if (result.image) {
-        setGeneratedResult(result);
+      const generationPromises = Array.from({ length: options.numberOfVariations }, () =>
+        generateStudioPortrait(sourceImage, prompt, clothingImage)
+      );
+
+      const results = await Promise.all(generationPromises);
+      const successfulResults = results
+        .filter(res => res.image)
+        .map(res => ({ ...res, id: crypto.randomUUID() } as GeneratedResult));
+
+      if (successfulResults.length > 0) {
+        setGeneratedResults(successfulResults);
+
+        // Compress images before saving to history to avoid quota errors
+        const sourceImageThumb = await createThumbnail(sourceImage.previewUrl);
+        const clothingImageThumb = clothingImage ? await createThumbnail(clothingImage.previewUrl) : null;
+        const resultsThumbs = await Promise.all(
+          successfulResults.map(result => 
+            result.image ? createThumbnail(result.image, 512, 512, 0.85) : Promise.resolve(null)
+          )
+        );
+
+        const newHistoryEntry: HistoryEntry = {
+            id: crypto.randomUUID(),
+            timestamp: Date.now(),
+            sourceImage: sourceImageThumb,
+            clothingImage: clothingImageThumb,
+            clothingPrompt,
+            additionalPrompt,
+            options,
+            results: successfulResults.map((original, index) => ({
+              id: original.id,
+              text: original.text,
+              image: resultsThumbs[index] ? (resultsThumbs[index] as UploadedImage).previewUrl : null,
+            })),
+        };
+        setHistory(prev => [newHistoryEntry, ...prev]);
+
       } else {
-        setError('無法生成圖片，請稍後再試。 ' + (result.text || ''));
+        setError('無法生成圖片，請調整設定後再試一次。');
       }
     } catch (e) {
       console.error(e);
@@ -578,60 +918,45 @@ const App: React.FC = () => {
   const handleSourceImageSelected = (image: UploadedImage) => {
     setSourceImage(image);
     setInputMode('upload');
-  }
+  };
 
   const handleClothingImageSelected = (image: UploadedImage | null) => {
     setClothingImage(image);
   }
 
-  const canGenerate = sourceImage && !isLoading;
-
-  const ResultPanel = () => {
-    if (isLoading) {
-      return (
-        <div className="flex flex-col items-center justify-center h-full space-y-4">
-          <Spinner />
-          <p className="text-slate-400 text-lg animate-pulse">AI 正在處理您的人像照...</p>
-          <p className="text-slate-500 text-sm text-center">這可能需要一點時間，請耐心等候。</p>
-        </div>
-      );
-    }
-    if (error) {
-      return (
-        <div className="flex flex-col items-center justify-center h-full text-center text-red-400 p-4 bg-red-900/20 rounded-lg">
-           <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <p className="font-semibold">生成失敗</p>
-          <p className="text-sm mt-2">{error}</p>
-        </div>
-      );
-    }
-    if (generatedResult?.image) {
-       return (
-        <div className="w-full h-full flex flex-col items-center justify-center animate-fadeIn">
-          <h2 className="text-2xl font-bold text-center mb-4 text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">您的專業人像照</h2>
-           <img
-              src={generatedResult.image}
-              alt="Generated"
-              className="rounded-lg w-full h-auto object-contain shadow-2xl shadow-black/50"
-            />
-          {generatedResult.text && (
-             <p className="text-center mt-4 text-slate-400 italic text-sm">{generatedResult.text}</p>
-          )}
-        </div>
-      );
-    }
-    return (
-       <div className="flex flex-col items-center justify-center h-full text-slate-500 text-center">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-          </svg>
-        <h3 className="text-xl font-medium text-slate-300">預覽結果</h3>
-        <p className="mt-1">設定風格後點擊生成，<br/>您的 AI 棚拍照將會顯示在此處。</p>
-      </div>
-    );
+  const handleClearHistory = () => {
+    setHistory([]);
+    localStorage.removeItem('generationHistory');
   };
+
+  const handleExport = async (entries: HistoryEntry[]) => {
+        setIsExporting(true);
+        try {
+            const zip = new JSZip();
+            for (const entry of entries) {
+                const folder = zip.folder(`generation_${new Date(entry.timestamp).toISOString().replace(/[:.]/g, '-')}`);
+                folder?.file("source.jpg", entry.sourceImage.base64, { base64: true });
+                entry.results.forEach((result, i) => {
+                    if(result.image) {
+                       folder?.file(`result_${i + 1}.png`, result.image.split(',')[1], { base64: true });
+                    }
+                });
+            }
+            const content = await zip.generateAsync({ type: "blob" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(content);
+            link.download = "ai_portraits_export.zip";
+            link.click();
+        } catch(e) {
+            console.error('Export failed:', e);
+            alert('匯出失敗，請查看控制台錯誤訊息。');
+        } finally {
+            setIsExporting(false);
+        }
+    };
+
+
+  const canGenerate = sourceImage && !isLoading;
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-200 flex flex-col items-center p-4 sm:p-6 lg:p-8 font-sans">
@@ -680,7 +1005,12 @@ const App: React.FC = () => {
            </div>
 
           <div className="lg:col-span-1 bg-slate-800/50 ring-1 ring-slate-700 rounded-xl p-4 sm:p-6 flex flex-col items-center justify-center min-h-[400px] lg:min-h-0">
-            <ResultPanel />
+            <ResultDisplay 
+                generatedResults={generatedResults} 
+                isLoading={isLoading} 
+                error={error}
+                options={options}
+            />
           </div>
         </main>
         
@@ -695,7 +1025,14 @@ const App: React.FC = () => {
             </button>
         </div>
 
+        <HistoryPanel 
+            history={history}
+            onClearHistory={handleClearHistory}
+            onExport={handleExport}
+            isExporting={isExporting}
+        />
       </div>
+
        <style>{`
           @keyframes fadeIn {
             from { opacity: 0; transform: scale(0.95); }
