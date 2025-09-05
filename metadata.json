@@ -1,0 +1,7 @@
+{
+  "name": "AI 棚拍人像攝影照 APP 5.0",
+  "description": "能根據原始照片生成棚拍風格照之外，可以把功能做到很全面，讓它成為「專業攝影棚 + 修圖師 + 證件照快拍機」的整合工具。",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
