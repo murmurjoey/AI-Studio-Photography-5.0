@@ -8,58 +8,6 @@ import type { UploadedImage, GeneratedResult, GenerationOptions, HistoryEntry } 
 import JSZip from 'jszip';
 
 
-// Helper function to create a compressed thumbnail from a data URL for storing in history
-const createThumbnail = async (
-  dataUrl: string, 
-  maxWidth: number = 256, 
-  maxHeight: number = 256, 
-  quality: number = 0.8
-): Promise<UploadedImage> => {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      // Calculate new dimensions while preserving aspect ratio
-      let { width, height } = img;
-      if (width > height) {
-        if (width > maxWidth) {
-          height = Math.round((height * maxWidth) / width);
-          width = maxWidth;
-        }
-      } else {
-        if (height > maxHeight) {
-          width = Math.round((width * maxHeight) / height);
-          height = maxHeight;
-        }
-      }
-
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        return reject(new Error('Could not get canvas context for thumbnail generation.'));
-      }
-      ctx.drawImage(img, 0, 0, width, height);
-      
-      const mimeType = 'image/jpeg';
-      const newDataUrl = canvas.toDataURL(mimeType, quality);
-      const [, base64Data] = newDataUrl.split(',');
-
-      resolve({
-        base64: base64Data,
-        mimeType,
-        previewUrl: newDataUrl,
-      });
-    };
-    img.onerror = (err) => {
-      console.error("Failed to load image for thumbnail creation", err);
-      reject(new Error('Failed to load image for thumbnail creation.'));
-    };
-    img.src = dataUrl;
-  });
-};
-
-
 // --- Reusable UI Components defined within App.tsx ---
 
 const MagicWandIcon: React.FC<{ className?: string }> = ({ className }) => (
@@ -879,28 +827,15 @@ const App: React.FC = () => {
       if (successfulResults.length > 0) {
         setGeneratedResults(successfulResults);
 
-        // Compress images before saving to history to avoid quota errors
-        const sourceImageThumb = await createThumbnail(sourceImage.previewUrl);
-        const clothingImageThumb = clothingImage ? await createThumbnail(clothingImage.previewUrl) : null;
-        const resultsThumbs = await Promise.all(
-          successfulResults.map(result => 
-            result.image ? createThumbnail(result.image, 512, 512, 0.85) : Promise.resolve(null)
-          )
-        );
-
         const newHistoryEntry: HistoryEntry = {
             id: crypto.randomUUID(),
             timestamp: Date.now(),
-            sourceImage: sourceImageThumb,
-            clothingImage: clothingImageThumb,
+            sourceImage: sourceImage,
+            clothingImage: clothingImage,
             clothingPrompt,
             additionalPrompt,
             options,
-            results: successfulResults.map((original, index) => ({
-              id: original.id,
-              text: original.text,
-              image: resultsThumbs[index] ? (resultsThumbs[index] as UploadedImage).previewUrl : null,
-            })),
+            results: successfulResults,
         };
         setHistory(prev => [newHistoryEntry, ...prev]);
 
@@ -935,10 +870,22 @@ const App: React.FC = () => {
             const zip = new JSZip();
             for (const entry of entries) {
                 const folder = zip.folder(`generation_${new Date(entry.timestamp).toISOString().replace(/[:.]/g, '-')}`);
-                folder?.file("source.jpg", entry.sourceImage.base64, { base64: true });
+                if (!folder) continue;
+
+                const sourceExtension = entry.sourceImage.mimeType.split('/')[1] || 'jpg';
+                folder.file(`source.${sourceExtension}`, entry.sourceImage.base64, { base64: true });
+                
+                if (entry.clothingImage) {
+                   const clothingExtension = entry.clothingImage.mimeType.split('/')[1] || 'jpg';
+                   folder.file(`clothing_ref.${clothingExtension}`, entry.clothingImage.base64, { base64: true });
+                }
+                
                 entry.results.forEach((result, i) => {
                     if(result.image) {
-                       folder?.file(`result_${i + 1}.png`, result.image.split(',')[1], { base64: true });
+                       const mimeType = result.image.substring(result.image.indexOf(':') + 1, result.image.indexOf(';'));
+                       const extension = mimeType.split('/')[1] || 'png';
+                       const base64Data = result.image.split(',')[1];
+                       folder.file(`result_${i + 1}.${extension}`, base64Data, { base64: true });
                     }
                 });
             }
